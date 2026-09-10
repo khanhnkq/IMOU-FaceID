@@ -6,6 +6,7 @@ Chữ tiếng Việt trên video được vẽ bằng Pillow (OpenCV không vẽ
 import glob
 import os
 import threading
+import time
 
 # Giảm delay RTSP: TCP cho ổn định + không đệm + low-delay.
 # Phải set trước khi VideoCapture đầu tiên được tạo.
@@ -19,6 +20,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 import config
+import headpose
 
 NGUOI_LA = "NGƯỜI LẠ"
 KHONG_THAY_MAT = "KHÔNG THẤY MẶT"
@@ -71,6 +73,7 @@ class ThreadedCamera:
     """
 
     def __init__(self, rtsp):
+        self.rtsp = rtsp
         self.cap = cv2.VideoCapture(rtsp, cv2.CAP_FFMPEG)
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self._opened = self.cap.isOpened()
@@ -82,6 +85,17 @@ class ThreadedCamera:
         if self._opened:
             self._thread = threading.Thread(target=self._loop, daemon=True)
             self._thread.start()
+
+    def _reconnect(self):
+        """Tạo lại kết nối RTSP (cam vừa rớt mạng / reboot)."""
+        try:
+            self.cap.release()
+        except Exception:
+            pass
+        time.sleep(2)
+        self.cap = cv2.VideoCapture(self.rtsp, cv2.CAP_FFMPEG)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        return self.cap.isOpened()
 
     def _loop(self):
         fails = 0
@@ -97,9 +111,14 @@ class ThreadedCamera:
                 fails = 0
             else:
                 fails += 1
-                if fails > 30:
-                    import time
-                    time.sleep(0.2)
+                if fails > 100:
+                    # rớt lâu -> nối lại từ đầu, cam reboot cũng tự bắt lại
+                    if self._reconnect():
+                        fails = 0
+                    else:
+                        time.sleep(5)
+                elif fails > 30:
+                    time.sleep(0.5)
 
     def isOpened(self):
         return self._opened
@@ -156,24 +175,30 @@ def draw_text_vi(frame, text, pos, color=(0, 255, 0), size=22):
 
 
 def match_frame(frame, known, thresh, min_ratio=0.0):
-    """Trả về (frame_đã_vẽ, [(label, sim, bbox)], n_mat_xa).
+    """Trả về (frame_đã_vẽ, [(label, sim, bbox)], n_mặt_xa, n_mặt_mờ).
 
-    Mặt nhỏ hơn min_ratio (rộng mặt / rộng khung) bị bỏ qua để tiết kiệm CPU
-    và chỉ quét khi ở gần. n_mat_xa = số mặt bị bỏ qua vì đứng xa.
+    Mặt nhỏ hơn min_ratio (đứng xa) hoặc mờ/nhòe (đang đi nhanh) bị bỏ qua
+    để tiết kiệm CPU và tránh báo nhầm.
     """
     h, w = frame.shape[:2]
     app = get_app()
     out = []
     n_far = 0
+    n_poor = 0
     try:
         faces = app.get(frame)
     except Exception:
-        return frame, out, n_far
+        return frame, out, n_far, n_poor
     for fc in faces:
         x1, y1, x2, y2 = map(int, fc.bbox)
         if min_ratio > 0 and (x2 - x1) / max(1, w) < min_ratio:
             n_far += 1
             cv2.rectangle(frame, (x1, y1), (x2, y2), (200, 200, 200), 1)
+            continue
+        ok_q, _ = headpose.face_quality(frame, fc.bbox)
+        if not ok_q:
+            n_poor += 1
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (150, 150, 150), 1)
             continue
         sims = {n: float(np.max(known[n] @ fc.normed_embedding)) for n in known}
         label = max(sims, key=sims.get)
@@ -184,4 +209,4 @@ def match_frame(frame, known, thresh, min_ratio=0.0):
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
         draw_text_vi(frame, f"{label} {sim:.2f}", (x1, max(0, y1 - 28)), color)
         out.append((label, sim, (x1, y1, x2, y2)))
-    return frame, out, n_far
+    return frame, out, n_far, n_poor

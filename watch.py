@@ -57,11 +57,15 @@ def main():
                 if config.MOTION_GATE and not motion:
                     text = "CANH TĨNH - ĐANG NGHỈ"
                 else:
-                    frame, res, n_far = face_engine.match_frame(
+                    frame, res, n_far, n_poor = face_engine.match_frame(
                         frame, known, args.thresh, near)
                     if not res:
-                        text = ("ĐỨNG GẦN CAMERA HƠN" if n_far > 0
-                                else face_engine.KHONG_THAY_MAT)
+                        if n_far > 0:
+                            text = "ĐỨNG GẦN CAMERA HƠN"
+                        elif n_poor > 0:
+                            text = "MẶT MỜ - ĐI CHẬM LẠI"
+                        else:
+                            text = face_engine.KHONG_THAY_MAT
                         prev_stranger = False
                     else:
                         best = max(res, key=lambda r: (r[2][2] - r[2][0]) * (r[2][3] - r[2][1]))

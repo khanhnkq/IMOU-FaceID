@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 .venv/
 .env
+agent.env
 .insightface/
 data/faces/*.npy
 !data/faces/.gitkeep

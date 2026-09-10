@@ -80,7 +80,7 @@ def build_qss(t):
 # ---------- Worker đọc camera ----------
 class VideoWorker(QtCore.QThread):
     frame_ready = QtCore.Signal(np.ndarray)
-    status_ready = QtCore.Signal(list, int)  # ([(label, sim)], n_mat_xa)
+    status_ready = QtCore.Signal(list, int, int)  # ([(label, sim)], n_mặt_xa, n_mặt_mờ)
 
     def __init__(self, rtsp, thresh_getter, parent=None):
         super().__init__(parent)
@@ -99,7 +99,7 @@ class VideoWorker(QtCore.QThread):
     def run(self):
         cap = face_engine.open_camera(self.rtsp)
         if not cap.isOpened():
-            self.status_ready.emit([("LỖI CAM", 0.0)], 0)
+            self.status_ready.emit([("LỖI CAM", 0.0)], 0, 0)
             return
         n = 0
         last_counter = -1
@@ -121,8 +121,8 @@ class VideoWorker(QtCore.QThread):
                     self.frame_ready.emit(frame)
                     continue
                 near = config.NEAR_MIN_RATIO if config.NEAR_MODE else 0.0
-                frame, res, n_far = face_engine.match_frame(frame, self.known, self.thresh_getter(), near)
-                self.status_ready.emit([(label, sim) for label, sim, _ in res], n_far)
+                frame, res, n_far, n_poor = face_engine.match_frame(frame, self.known, self.thresh_getter(), near)
+                self.status_ready.emit([(label, sim) for label, sim, _ in res], n_far, n_poor)
             self.frame_ready.emit(frame)
         cap.release()
 
@@ -368,11 +368,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.video.setPixmap(QtGui.QPixmap.fromImage(img).scaled(
             self.video.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
 
-    def show_status(self, res, n_far=0):
+    def show_status(self, res, n_far=0, n_poor=0):
         if not res:
             self._prev_stranger = False
             if n_far > 0:
                 self.badge.setText("ĐỨNG GẦN CAMERA HƠN")
+                self.badge.setObjectName("badge-near")
+            elif n_poor > 0:
+                self.badge.setText("MẶT MỜ - ĐI CHẬM LẠI")
                 self.badge.setObjectName("badge-near")
             else:
                 self.badge.setText(face_engine.KHONG_THAY_MAT)

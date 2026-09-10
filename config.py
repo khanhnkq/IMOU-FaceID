@@ -4,6 +4,8 @@ from dotenv import load_dotenv
 
 # Đọc biến môi trường từ file .env (cùng thư mục với file này)
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+# File agent.env chứa key 9Router (tách riêng để khỏi lộ chung .env cam)
+load_dotenv(os.path.join(os.path.dirname(__file__), "agent.env"))
 
 # === ĐỔI CHO PHÙ HỢP VỚI CAM CỦA BẠN ===
 # User mặc định của Imou Cue 2 là admin
