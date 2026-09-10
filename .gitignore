@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+.insightface/
+data/faces/*.npy
+!data/faces/.gitkeep
+data/*.log
