@@ -1,6 +1,9 @@
-# Imou Cue 2 FaceID - nhìn vào cam là biết TÔI / NGƯỜI LẠ
+# Imou FaceID đa cam - nhìn vào cam là biết TÔI / NGƯỜI LẠ
 
 Không cần train. Model InsightFace đã train sẵn, bạn chỉ cần enroll mặt.
+
+Cam đang chạy: **Hành lang** (Cue 2) + **Trong nhà** (Ranger 2). Thêm cam mới thì
+điền `cams.env` (CAM2_*, CAM3_*) theo mẫu — code tự nhận, không cần sửa.
 
 ## 1. Cài đặt
 
@@ -42,6 +45,12 @@ Bản service canh 24/7 (không cửa sổ, chỉ báo Telegram):
 
 Bật/tắt nhanh service bằng phím `SUPER + F9` (hoặc chạy `./toggle-faceid.sh`).
 Log service nằm ở `data/faceid.log`.
+
+Lệnh Telegram trên bot báo trộm (chỉ chủ nhà): `/cam` xem mọi cam,
+`/cam1`, `/cam2` hoặc `/cam <tên>` xem 1 cam.
+
+Đăng ký mặt cộng dồn: enroll cùng tên sẽ **thêm góc mới** vào profile có sẵn
+(tối đa 60 góc) thay vì ghi đè — đứng cam nào enroll thì mở hộp chọn cam đó.
 
 - Hiện `TÔI: <tên> - Chào bạn!` = là bạn
 - Hiện `NGƯỜI LẠ` = không khớp ai → gửi ảnh về Telegram

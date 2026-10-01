@@ -1,11 +1,11 @@
-"""App FaceID Imou Cue 2 - GUI native Qt theo màu Caelestia.
+"""App FaceID đa cam - GUI native Qt theo màu Caelestia.
 
 Chạy:
     python app_gui.py
 
-- Video live + badge TÔI (xanh) / NGƯỜI LẠ (đỏ)
-- Danh sách người đã enroll, nút Enroll có hướng dẫn từng góc
-- Thanh trượt ngưỡng nhận diện, nhật ký nhận diện
+- Mỗi cam 1 khung video + badge TÔI (xanh) / NGƯỜI LẠ (đỏ)
+- Danh sách người đã enroll, nút Enroll (chọn cam) có hướng dẫn từng góc
+- Thanh trượt ngưỡng nhận diện (áp dụng mọi cam), nhật ký nhận diện
 """
 import os
 import re
@@ -20,6 +20,7 @@ import config
 import face_engine
 import headpose
 import notify
+import telecmd
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -72,19 +73,20 @@ def build_qss(t):
     QListWidget {{ background: {t['surface']}; border-radius: 12px; padding: 6px; }}
     QTextEdit {{ background: {t['surface']}; border-radius: 12px; padding: 6px; }}
     QLineEdit {{ background: {t['surface2']}; border-radius: 8px; padding: 8px; }}
+    QComboBox {{ background: {t['surface2']}; border-radius: 8px; padding: 8px; }}
     QSlider::groove:horizontal {{ background: {t['surface2']}; height: 6px; border-radius: 3px; }}
     QSlider::handle:horizontal {{ background: {t['primary']}; width: 18px; margin: -6px 0; border-radius: 9px; }}
     """
 
 
-# ---------- Worker đọc camera ----------
+# ---------- Worker đọc camera (1 worker / 1 cam) ----------
 class VideoWorker(QtCore.QThread):
-    frame_ready = QtCore.Signal(np.ndarray)
-    status_ready = QtCore.Signal(list, int, int)  # ([(label, sim)], n_mặt_xa, n_mặt_mờ)
+    frame_ready = QtCore.Signal(str, np.ndarray)  # (tên cam, frame)
+    status_ready = QtCore.Signal(str, list, int, int)  # (tên, [(label, sim)], xa, mờ)
 
-    def __init__(self, rtsp, thresh_getter, parent=None):
+    def __init__(self, cam, thresh_getter, parent=None):
         super().__init__(parent)
-        self.rtsp = rtsp
+        self.cam = cam
         self.thresh_getter = thresh_getter
         self._run = True
         self.known = face_engine.load_faces()
@@ -97,9 +99,10 @@ class VideoWorker(QtCore.QThread):
         self.wait(3000)
 
     def run(self):
-        cap = face_engine.open_camera(self.rtsp)
+        name = self.cam["name"]
+        cap = face_engine.open_camera(self.cam["rtsp"])
         if not cap.isOpened():
-            self.status_ready.emit([("LỖI CAM", 0.0)], 0, 0)
+            self.status_ready.emit(name, [("LỖI CAM", 0.0)], 0, 0)
             return
         n = 0
         last_counter = -1
@@ -118,12 +121,13 @@ class VideoWorker(QtCore.QThread):
                 motion, prev_gray = face_engine.has_motion(
                     prev_gray, frame, config.MOTION_THRESH)
                 if config.MOTION_GATE and not motion:
-                    self.frame_ready.emit(frame)
+                    self.frame_ready.emit(name, frame)
                     continue
-                near = config.NEAR_MIN_RATIO if config.NEAR_MODE else 0.0
-                frame, res, n_far, n_poor = face_engine.match_frame(frame, self.known, self.thresh_getter(), near)
-                self.status_ready.emit([(label, sim) for label, sim, _ in res], n_far, n_poor)
-            self.frame_ready.emit(frame)
+                frame, res, n_far, n_poor = face_engine.match_frame(
+                    frame, self.known, self.thresh_getter(), self.cam["near"])
+                self.status_ready.emit(name, [(label, sim) for label, sim, _ in res],
+                                       n_far, n_poor)
+            self.frame_ready.emit(name, frame)
         cap.release()
 
 
@@ -131,17 +135,25 @@ class VideoWorker(QtCore.QThread):
 class EnrollDialog(QtWidgets.QDialog):
     enrolled = QtCore.Signal(str)
 
-    def __init__(self, rtsp, parent=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.rtsp = rtsp
+        self.cams = {c["name"]: c["rtsp"] for c in config.CAMERAS}
+        self.rtsp = next(iter(self.cams.values()), "")
         self.embs = []
         self.guide = headpose.PoseGuide(shots_per_target=2)
         self._hint = "đang tìm mặt..."
         self._last_det = 0
         self.setWindowTitle("Đăng ký khuôn mặt kiểu Face ID")
-        self.resize(700, 620)
+        self.resize(700, 660)
 
         lay = QtWidgets.QVBoxLayout(self)
+        camrow = QtWidgets.QHBoxLayout()
+        camrow.addWidget(QtWidgets.QLabel("Camera:"))
+        self.cam_combo = QtWidgets.QComboBox()
+        self.cam_combo.addItems(list(self.cams.keys()))
+        self.cam_combo.currentTextChanged.connect(self.set_cam)
+        camrow.addWidget(self.cam_combo, 1)
+        lay.addLayout(camrow)
         self.video = QtWidgets.QLabel("Đang mở camera...")
         self.video.setObjectName("video")
         self.video.setAlignment(QtCore.Qt.AlignCenter)
@@ -179,6 +191,17 @@ class EnrollDialog(QtWidgets.QDialog):
         self.timer.timeout.connect(self.tick)
         self.timer.start(60)
         self.cur = None
+        self.update_label()
+
+    def set_cam(self, name):
+        """Đổi cam enroll: mở lại stream + làm mới hướng dẫn (tránh trộn góc 2 view)."""
+        if self.cap.isOpened():
+            self.cap.release()
+        self.rtsp = self.cams.get(name, self.rtsp)
+        self.cap = face_engine.open_camera(self.rtsp)
+        self.embs = []
+        self.guide = headpose.PoseGuide(shots_per_target=2)
+        self._hint = "đang tìm mặt..."
         self.update_label()
 
     def update_label(self):
@@ -244,7 +267,22 @@ class EnrollDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, "Chưa đủ", "Chụp ít nhất 8 ảnh nhiều góc.")
             return
         os.makedirs(config.FACES_DIR, exist_ok=True)
-        np.save(os.path.join(config.FACES_DIR, f"{name}.npy"), np.stack(self.embs))
+        path = os.path.join(config.FACES_DIR, f"{name}.npy")
+        new = np.stack(self.embs)
+        if os.path.exists(path):
+            try:
+                old = np.load(path)
+                if old.ndim == 1:
+                    old = old.reshape(1, -1)
+                # cộng dồn góc mới vào profile có sẵn, giữ tối đa 60 góc mới nhất
+                new = np.vstack([old, new])[-60:]
+                msg = f"Đã thêm {len(self.embs)} góc vào '{name}' (tổng {len(new)} góc)."
+            except Exception:
+                msg = f"File cũ lỗi, đã ghi đè '{name}' ({len(new)} góc)."
+        else:
+            msg = f"Đã tạo '{name}' ({len(new)} góc)."
+        np.save(path, new)
+        QtWidgets.QMessageBox.information(self, "Xong", msg)
         self.enrolled.emit(name)
         self.accept()
 
@@ -259,25 +297,37 @@ class EnrollDialog(QtWidgets.QDialog):
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Imou Cue 2 FaceID")
-        self.resize(1180, 720)
-        self.thresh = config.THRESHOLD
+        self.setWindowTitle("Imou FaceID - 2 Cam")
+        self.resize(1280, 760)
 
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         main = QtWidgets.QHBoxLayout(central)
 
-        # Cột trái: video
+        # Cột trái: 1 panel video + badge cho mỗi cam
         left = QtWidgets.QVBoxLayout()
-        self.video = QtWidgets.QLabel("Nhấn Bắt đầu để mở camera")
-        self.video.setObjectName("video")
-        self.video.setAlignment(QtCore.Qt.AlignCenter)
-        self.video.setMinimumSize(640, 480)
-        left.addWidget(self.video, 1)
-        self.badge = QtWidgets.QLabel("ĐANG DỪNG")
-        self.badge.setObjectName("badge-idle")
-        self.badge.setAlignment(QtCore.Qt.AlignCenter)
-        left.addWidget(self.badge)
+        self.cam_video = {}
+        self.cam_badge = {}
+        if not config.CAMERAS:
+            left.addWidget(QtWidgets.QLabel("Chưa cấu hình cam nào (.env / cams.env)"))
+        for cam in config.CAMERAS:
+            title = QtWidgets.QLabel(cam["name"])
+            f = title.font()
+            f.setBold(True)
+            f.setPointSize(15)
+            title.setFont(f)
+            left.addWidget(title)
+            v = QtWidgets.QLabel("Nhấn Bắt đầu để mở camera")
+            v.setObjectName("video")
+            v.setAlignment(QtCore.Qt.AlignCenter)
+            v.setMinimumSize(480, 270)
+            left.addWidget(v, 1)
+            b = QtWidgets.QLabel("ĐANG DỪNG")
+            b.setObjectName("badge-idle")
+            b.setAlignment(QtCore.Qt.AlignCenter)
+            left.addWidget(b)
+            self.cam_video[cam["name"]] = v
+            self.cam_badge[cam["name"]] = b
         main.addLayout(left, 2)
 
         # Cột phải: điều khiển
@@ -293,11 +343,11 @@ class MainWindow(QtWidgets.QMainWindow):
         card_lay.addWidget(self.btn_toggle)
         card_lay.addWidget(self.btn_enroll)
 
-        card_lay.addWidget(QtWidgets.QLabel("Ngưỡng nhận diện"))
+        card_lay.addWidget(QtWidgets.QLabel("Ngưỡng nhận diện (mọi cam)"))
         self.slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.slider.setRange(30, 60)
-        self.slider.setValue(int(self.thresh * 100))
-        self.lbl_thresh = QtWidgets.QLabel(f"{self.thresh:.2f}")
+        self.slider.setValue(int(config.THRESHOLD * 100))
+        self.lbl_thresh = QtWidgets.QLabel(f"{config.THRESHOLD:.2f}")
         card_lay.addWidget(self.slider)
         card_lay.addWidget(self.lbl_thresh)
         right.addWidget(card)
@@ -317,9 +367,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_enroll.clicked.connect(self.open_enroll)
         self.slider.valueChanged.connect(self.on_thresh)
 
-        self.worker = None
-        self._last_frame = None
-        self._prev_stranger = False
+        self.workers = {}
+        self._last_frame = {}
+        self._prev_stranger = {}
+        self.cam_thresh = {c["name"]: c["thresh"] for c in config.CAMERAS}
         self.refresh_faces()
         self.log_msg("Sẵn sàng. Nhấn Bắt đầu.")
 
@@ -333,87 +384,109 @@ class MainWindow(QtWidgets.QMainWindow):
             self.faces_list.addItem(f"{n} ({arr.shape[0]} góc)")
 
     def on_thresh(self, v):
-        self.thresh = v / 100
-        self.lbl_thresh.setText(f"{self.thresh:.2f}")
+        for name in self.cam_thresh:
+            self.cam_thresh[name] = v / 100
+        self.lbl_thresh.setText(f"{v / 100:.2f}")
 
     def toggle(self):
-        if self.worker is None:
+        if not self.workers:
             known = face_engine.load_faces()
             if not known:
                 QtWidgets.QMessageBox.information(self, "Chưa có dữ liệu",
                                                   "Nhấn 'Đăng ký mặt mới' trước.")
                 return
-            self.worker = VideoWorker(config.RTSP_URL, lambda: self.thresh, self)
-            self.worker.frame_ready.connect(self.show_frame)
-            self.worker.status_ready.connect(self.show_status)
-            self.worker.finished.connect(self.on_stopped)
-            self.worker.start()
+            if not config.CAMERAS:
+                QtWidgets.QMessageBox.information(self, "Chưa có cam",
+                                                  "Điền .env (cam 1) / cams.env (cam 2).")
+                return
+            for cam in config.CAMERAS:
+                name = cam["name"]
+                w = VideoWorker(cam, lambda n=name: self.cam_thresh[n], self)
+                w.frame_ready.connect(self.show_frame)
+                w.status_ready.connect(self.show_status)
+                w.finished.connect(lambda n=name: self.on_stopped(n))
+                w.start()
+                self.workers[name] = w
+            telecmd.start(config.CAMERAS)
             self.btn_toggle.setText("Dừng lại")
-            self.log_msg("Đã mở camera.")
+            self.log_msg(f"Đã mở {len(self.workers)} camera + lệnh Telegram /cam.")
         else:
-            self.worker.stop()
-            self.worker = None
+            for w in self.workers.values():
+                w.stop()
+            self.workers = {}
+            telecmd.stop()
             self.btn_toggle.setText("Bắt đầu")
 
-    def on_stopped(self):
-        self.badge.setText("ĐANG DỪNG")
-        self.badge.setObjectName("badge-idle")
-        self.badge.setStyleSheet("")
+    def on_stopped(self, name):
+        badge = self.cam_badge.get(name)
+        if badge is None:
+            return
+        badge.setText("ĐANG DỪNG")
+        badge.setObjectName("badge-idle")
+        badge.setStyleSheet("")
 
-    def show_frame(self, frame):
-        self._last_frame = frame.copy()
+    def show_frame(self, name, frame):
+        self._last_frame[name] = frame.copy()
+        video = self.cam_video.get(name)
+        if video is None:
+            return
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, _ = rgb.shape
         img = QtGui.QImage(rgb.data, w, h, 3 * w, QtGui.QImage.Format_RGB888)
-        self.video.setPixmap(QtGui.QPixmap.fromImage(img).scaled(
-            self.video.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+        video.setPixmap(QtGui.QPixmap.fromImage(img).scaled(
+            video.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
 
-    def show_status(self, res, n_far=0, n_poor=0):
+    def show_status(self, name, res, n_far=0, n_poor=0):
+        badge = self.cam_badge.get(name)
+        if badge is None:
+            return
         if not res:
-            self._prev_stranger = False
+            self._prev_stranger[name] = False
             if n_far > 0:
-                self.badge.setText("ĐỨNG GẦN CAMERA HƠN")
-                self.badge.setObjectName("badge-near")
+                badge.setText("ĐỨNG GẦN CAMERA HƠN")
+                badge.setObjectName("badge-near")
             elif n_poor > 0:
-                self.badge.setText("MẶT MỜ - ĐI CHẬM LẠI")
-                self.badge.setObjectName("badge-near")
+                badge.setText("MẶT MỜ - ĐI CHẬM LẠI")
+                badge.setObjectName("badge-near")
             else:
-                self.badge.setText(face_engine.KHONG_THAY_MAT)
-                self.badge.setObjectName("badge-idle")
+                badge.setText(face_engine.KHONG_THAY_MAT)
+                badge.setObjectName("badge-idle")
         else:
             label, sim = max(res, key=lambda x: x[1])
             if label == face_engine.NGUOI_LA:
-                self.badge.setText(f"{face_engine.NGUOI_LA} ({sim:.2f})")
-                self.badge.setObjectName("badge-stranger")
-                self.log_msg(f"Cảnh báo: {face_engine.NGUOI_LA} ({sim:.2f})")
-                is_new = not self._prev_stranger
-                self._prev_stranger = True
-                if self._last_frame is not None:
-                    img = self._last_frame.copy()
+                badge.setText(f"{face_engine.NGUOI_LA} ({sim:.2f})")
+                badge.setObjectName("badge-stranger")
+                self.log_msg(f"[{name}] Cảnh báo: {face_engine.NGUOI_LA} ({sim:.2f})")
+                is_new = not self._prev_stranger.get(name, False)
+                self._prev_stranger[name] = True
+                if self._last_frame.get(name) is not None:
+                    img = self._last_frame[name].copy()
                     threading.Thread(target=notify.send_stranger_alert,
-                                     args=(img, sim), kwargs={"is_new": is_new},
+                                     args=(img, sim),
+                                     kwargs={"is_new": is_new, "cam_name": name},
                                      daemon=True).start()
             elif label == "LỖI CAM":
-                self._prev_stranger = False
-                self.badge.setText("LỖI CAM - kiểm tra RTSP")
-                self.badge.setObjectName("badge-stranger")
+                self._prev_stranger[name] = False
+                badge.setText("LỖI CAM - kiểm tra RTSP")
+                badge.setObjectName("badge-stranger")
             else:
-                self._prev_stranger = False
-                self.badge.setText(f"TÔI: {label} ({sim:.2f}) - Chào bạn!")
-                self.badge.setObjectName("badge-ok")
+                self._prev_stranger[name] = False
+                badge.setText(f"TÔI: {label} ({sim:.2f}) - Chào bạn!")
+                badge.setObjectName("badge-ok")
         # refresh style theo objectName mới
-        self.badge.style().unpolish(self.badge)
-        self.badge.style().polish(self.badge)
+        badge.style().unpolish(badge)
+        badge.style().polish(badge)
 
     def open_enroll(self):
-        dlg = EnrollDialog(config.RTSP_URL, self)
+        dlg = EnrollDialog(self)
         dlg.enrolled.connect(lambda n: (self.refresh_faces(), self.log_msg(f"Đã đăng ký: {n}")))
         dlg.exec()
 
     def closeEvent(self, ev):
-        if self.worker is not None:
-            self.worker.stop()
-            self.worker = None
+        for w in self.workers.values():
+            w.stop()
+        self.workers = {}
+        telecmd.stop()
         super().closeEvent(ev)
 
 

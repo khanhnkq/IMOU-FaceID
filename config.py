@@ -4,8 +4,8 @@ from dotenv import load_dotenv
 
 # Đọc biến môi trường từ file .env (cùng thư mục với file này)
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
-# File agent.env chứa key 9Router (tách riêng để khỏi lộ chung .env cam)
-load_dotenv(os.path.join(os.path.dirname(__file__), "agent.env"))
+# File cams.env chứa cam phụ (không ghi đè .env)
+load_dotenv(os.path.join(os.path.dirname(__file__), "cams.env"))
 
 # === ĐỔI CHO PHÙ HỢP VỚI CAM CỦA BẠN ===
 # User mặc định của Imou Cue 2 là admin
@@ -51,3 +51,27 @@ RECOG_EVERY_N_FRAMES = int(os.getenv("FRAME_SKIP", "25"))
 # Ngưỡng chênh lệch sáng trung bình (0-255). Tăng nếu cam nhiễu/hay báo động giả.
 MOTION_GATE = os.getenv("MOTION_GATE", "1") == "1"
 MOTION_THRESH = float(os.getenv("MOTION_THRESH", "2.5"))
+
+# Danh sách cam: cam 1 lấy từ .env (IMOU_*), cam 2+ lấy từ cams.env (CAM2_*).
+# Cam nào thiếu IP/PASS thì tự bỏ qua.
+def _cam_entry(name, user, pwd, ip, full_url, thresh_ov, near_ov):
+    if not full_url:
+        if not pwd or not ip or pwd == "SAFETY_CODE_DOI_O_DAY":
+            return None
+        full_url = (f"rtsp://{user}:{pwd}@{ip}:554"
+                    "/cam/realmonitor?channel=1&subtype=1")
+    thresh = float(thresh_ov) if thresh_ov else THRESHOLD
+    near = float(near_ov) if near_ov else (NEAR_MIN_RATIO if NEAR_MODE else 0.0)
+    return {"name": name, "rtsp": full_url, "thresh": thresh, "near": near}
+
+
+CAMERAS = [c for c in [
+    _cam_entry(os.getenv("CAM1_NAME", "Hành lang"),
+               RTSP_USER, RTSP_PASS, RTSP_IP,
+               os.getenv("IMOU_RTSP", ""),  # URL đầy đủ (ưu tiên nếu có)
+               os.getenv("CAM1_THRESH", ""), os.getenv("CAM1_NEAR", "")),
+    _cam_entry(os.getenv("CAM2_NAME", "Trong nhà"),
+               os.getenv("CAM2_USER", "admin"), os.getenv("CAM2_PASS", ""),
+               os.getenv("CAM2_IP", ""), os.getenv("CAM2_RTSP", ""),
+               os.getenv("CAM2_THRESH", ""), os.getenv("CAM2_NEAR", "")),
+] if c]
